@@ -295,3 +295,17 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+# --- Runner para polling ---
+async def run_bot():
+    """Arranca el polling y reintenta si algo falla."""
+    while True:
+        try:
+            print(">>> Iniciando polling del bot ...")
+            await dp.start_polling(bot, skip_updates=True)
+        except Exception as e:
+            print(f"[run_bot] Error: {e}. Reintentando en 5s...")
+            await asyncio.sleep(5)
+
+if __name__ == "__main__":
+    # Permite ejecutar local: python bot.py
+    asyncio.run(run_bot())
