@@ -1,375 +1,296 @@
-# --- Reto Relámpago LATAM (MVP Pro v2) ---
-# Evita repeticiones en la ronda + filtros por categoría/dificultad
-# Aiogram 3.x + python-dotenv 1.x
-
-import os, json, random, time, asyncio, logging
+# --- Reto Relámpago LATAM (versión PRO) ---
+import os, json, random, time, sqlite3, logging, asyncio
 from datetime import datetime
 from dotenv import load_dotenv
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.filters import Command, CommandObject
+from aiogram.types import Message, CallbackQuery
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# --------------- Config ---------------
-load_dotenv()
+# ----------------- Config -----------------
+load_dotenv()  # Lee .env si existe
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("Falta BOT_TOKEN en .env")
+    raise RuntimeError("Falta BOT_TOKEN en variables de entorno o .env")
 
-FREE_PER_DAY = 3
-QUESTIONS_PER_ROUND = 5
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+FREE_PER_DAY = 3             # rondas gratis por día
+QUESTIONS_PER_ROUND = 5      # preguntas por ronda
+
+# Bonus de puntos por dificultad
+DIFF_BONUS = {"facil": 1, "media": 2, "dificil": 3}
+
+# Categorías y niveles permitidos (para validación y ayuda)
+CATEGORIES = {"geografia","ciencia","entretenimiento","historia","tecnologia","arte","deportes"}
+LEVELS = {"facil","media","dificil"}
+
 SEED_FILE = "data_seed.json"
-SCORES_FILE = "scores.json"
+DB_FILE = "scores.db"
 
-# --------------- Bot ---------------
-bot = Bot(BOT_TOKEN)
-dp = Dispatcher()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
+# Memoria de sesión por usuario (para la ronda en curso)
+SESSIONS = {}  # uid -> {"n": int, "score": int, "cat": str|None, "diff": str|None}
 
-# --------------- Estado en memoria ---------------
-# USERS[user_id] = {
-#   "day": int, "free": int,
-#   "round": {"asked":int, "score":int, "current_correct":int, "queue":list, "total_q":int} | None,
-#   "total": int,
-#   "daily_claim_day": int | None,
-#   "name": str,
-#   "cfg": {"category": str|None, "difficulty": str|None}
-# }
-USERS: dict[int, dict] = {}
+# ----------------- DB -----------------
+def db():
+    return sqlite3.connect(DB_FILE)
 
-def today_key() -> int:
+def init_db():
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS users(
+            user_id     INTEGER PRIMARY KEY,
+            username    TEXT,
+            total_pts   INTEGER DEFAULT 0,
+            day_key     INTEGER DEFAULT 0,
+            free_left   INTEGER DEFAULT 0
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def today_key():
     return int(time.time() // 86400)
 
-def ensure_user(m: Message | CallbackQuery):
-    u = m.from_user
-    uid = u.id
-    day = today_key()
-    me = USERS.get(uid)
-    if not me:
-        me = {
-            "day": day,
-            "free": FREE_PER_DAY,
-            "round": None,
-            "total": 0,
-            "daily_claim_day": None,
-            "name": (u.full_name or str(uid))[:50],
-            "cfg": {"category": None, "difficulty": None},
-        }
-        USERS[uid] = me
-    if me["day"] != day:  # reset diario
-        me["day"] = day
-        me["free"] = FREE_PER_DAY
-        me["round"] = None
-        me["daily_claim_day"] = None
-    return uid, me
+def get_user(uid: int, username: str):
+    conn = db()
+    cur = conn.cursor()
+    row = cur.execute("SELECT user_id, username, total_pts, day_key, free_left FROM users WHERE user_id=?",
+                      (uid,)).fetchone()
+    if not row:
+        cur.execute("INSERT INTO users(user_id, username, total_pts, day_key, free_left) VALUES(?,?,?,?,?)",
+                    (uid, username, 0, 0, 0))
+        conn.commit()
+        row = cur.execute("SELECT user_id, username, total_pts, day_key, free_left FROM users WHERE user_id=?",
+                          (uid,)).fetchone()
 
-# --------------- Preguntas ---------------
-DEFAULT_QS = [
-    {"q":"¿Cuántos minutos tiene una hora?","a":["30","45","90","60"],"correct":3,"category":"General","difficulty":"Fácil"},
-    {"q":"¿Cuál es la capital de Argentina?","a":["La Plata","Córdoba","Buenos Aires","Rosario"],"correct":2,"category":"Geografía","difficulty":"Fácil"},
-    {"q":"¿Qué plataforma usa Reels?","a":["Twitch","Reddit","Twitter","Instagram"],"correct":3,"category":"Tecnología","difficulty":"Fácil"},
-    {"q":"¿Qué metal es líquido a temperatura ambiente?","a":["Hierro","Calcio","Plomo","Mercurio"],"correct":3,"category":"Ciencia","difficulty":"Media"},
-    {"q":"¿Qué empresa creó Android?","a":["Apple","Google","Microsoft","Nokia"],"correct":1,"category":"Tecnología","difficulty":"Media"},
-    {"q":"¿De qué universo es Iron Man?","a":["Marvel","DC","Image","Dark Horse"],"correct":0,"category":"Entretenimiento","difficulty":"Fácil"},
-    {"q":"¿Dónde se ubicó el Imperio Inca?","a":["Chile","Perú","Colombia","México"],"correct":1,"category":"Historia","difficulty":"Fácil"},
-    {"q":"¿Capital azteca?","a":["Capital moche","Capital inca","Capital maya","Tenochtitlán"],"correct":3,"category":"Historia","difficulty":"Media"},
-]
+    # Reinicio diario de rondas gratis
+    u_id, u_name, pts, dkey, free_left = row
+    tkey = today_key()
+    if dkey != tkey:
+        free_left = FREE_PER_DAY
+        dkey = tkey
+        cur.execute("UPDATE users SET day_key=?, free_left=?, username=? WHERE user_id=?",
+                    (dkey, free_left, username, uid))
+        conn.commit()
 
-def normalize_item(it):
-    # Asegurar campos y defaults
-    q = it.get("q")
-    a = it.get("a")
-    c = it.get("correct")
-    if not isinstance(a, list) or not isinstance(c, int) or q is None:
-        return None
-    return {
-        "q": q,
-        "a": a,
-        "correct": c,
-        "category": it.get("category", "General"),
-        "difficulty": it.get("difficulty", "Normal"),
-    }
+    conn.close()
+    return {"user_id": u_id, "username": u_name, "total_pts": pts, "day_key": dkey, "free_left": free_left}
 
+def dec_free_round(uid: int):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET free_left = CASE WHEN free_left>0 THEN free_left-1 ELSE 0 END WHERE user_id=?",
+                (uid,))
+    conn.commit()
+    conn.close()
+
+def add_points(uid: int, delta: int):
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET total_pts = total_pts + ? WHERE user_id=?", (delta, uid))
+    conn.commit()
+    conn.close()
+
+def top_users(limit=10):
+    conn = db()
+    cur = conn.cursor()
+    rows = cur.execute("SELECT username, total_pts FROM users ORDER BY total_pts DESC LIMIT ?", (limit,)).fetchall()
+    conn.close()
+    return rows
+
+# ----------------- Preguntas -----------------
 def load_questions():
     try:
         with open(SEED_FILE, "r", encoding="utf-8") as f:
             items = json.load(f)
-            norm = []
-            for it in items:
-                it2 = normalize_item(it)
-                if it2:
-                    norm.append(it2)
-            return norm if norm else [normalize_item(x) for x in DEFAULT_QS]
     except FileNotFoundError:
-        with open(SEED_FILE, "w", encoding="utf-8") as f:
-            json.dump(DEFAULT_QS, f, ensure_ascii=False, indent=2)
-        return [normalize_item(x) for x in DEFAULT_QS]
+        items = []
+    norm = []
+    for it in items:
+        if all(k in it for k in ("q","a","correct","category","difficulty")):
+            norm.append({"q": it["q"], "a": it["a"], "correct": it["correct"],
+                         "category": it["category"].lower(), "difficulty": it["difficulty"].lower()})
+    return norm
 
 QUESTIONS = load_questions()
 
-def categories_list():
-    return sorted(set(it["category"] for it in QUESTIONS))
-
-def difficulties_list():
-    return sorted(set(it["difficulty"] for it in QUESTIONS))
-
-def build_pool(me_cfg):
-    cat = me_cfg.get("category")
-    diff = me_cfg.get("difficulty")
+def pick_question(category: str|None = None, difficulty: str|None = None):
     pool = QUESTIONS
-    if cat:
-        pool = [it for it in pool if it["category"] == cat]
-    if diff:
-        pool = [it for it in pool if it["difficulty"] == diff]
-    return pool
+    if category:
+        pool = [q for q in pool if q["category"] == category]
+    if difficulty:
+        pool = [q for q in pool if q["difficulty"] == difficulty]
+    if not pool:
+        pool = QUESTIONS[:]  # fallback a todo
+    item = random.choice(pool)
+    # barajar respuestas
+    idxs = list(range(len(item["a"])))
+    random.shuffle(idxs)
+    answers = [ item["a"][i] for i in idxs ]
+    correct_new_pos = idxs.index(item["correct"])
+    return item["q"], answers, correct_new_pos, item["difficulty"]
 
-def make_round_queue(pool, n):
-    # Tomar n preguntas SIN repetición y barajar las respuestas
-    # Si hay menos de n, usamos todas.
-    n = min(n, len(pool))
-    chosen = random.sample(pool, n)  # sin repetición
-    queue = []
-    for it in chosen:
-        idxs = list(range(len(it["a"])))
-        random.shuffle(idxs)
-        answers = [it["a"][i] for i in idxs]
-        correct_pos = idxs.index(it["correct"])
-        queue.append({"q": it["q"], "answers": answers, "correct": correct_pos})
-    return queue
+# ----------------- Bot -----------------
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 
-# --------------- Persistencia de puntajes ---------------
-def load_scores():
-    try:
-        with open(SCORES_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            for uid_str, v in data.items():
-                uid = int(uid_str)
-                if uid not in USERS:
-                    USERS[uid] = {
-                        "day": today_key(), "free": FREE_PER_DAY, "round": None,
-                        "total": int(v.get("total", 0)), "daily_claim_day": None,
-                        "name": v.get("name", str(uid))[:50],
-                        "cfg": {"category": None, "difficulty": None},
-                    }
-    except FileNotFoundError:
-        pass
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher()
 
-def save_scores():
-    data = {str(uid): {"name": u["name"], "total": u["total"]} for uid, u in USERS.items()}
-    with open(SCORES_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-load_scores()
-
-# --------------- Teclado principal ---------------
-def main_kb():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="▶️ Jugar (/play)")],
-            [KeyboardButton(text="🎁 Cofre diario (/daily)"), KeyboardButton(text="🏆 Ranking (/rank)")],
-            [KeyboardButton(text="⚙️ Filtros (/mode)")]
-        ],
-        resize_keyboard=True
+def fmt_cmds():
+    return (
+        "Comandos:\n"
+        "• /play [categoria] [nivel] – jugar 1 ronda (5 preguntas)\n"
+        "   Ej: /play ciencia media\n"
+        "• /daily – reclamar regalo diario (+1 ronda)\n"
+        "• /rank – ver ranking\n"
+        "• /help – ayuda\n\n"
+        f"Categorías: {', '.join(sorted(CATEGORIES))}\n"
+        f"Dificultades: {', '.join(sorted(LEVELS))}"
     )
 
-# --------------- Flujo de ronda ---------------
-async def start_round(m: Message):
-    uid, me = ensure_user(m)
-    if me["free"] <= 0:
-        await m.answer("Ya usaste tus partidas gratis hoy. Vuelve mañana o usa /daily.", reply_markup=main_kb())
-        return
-
-    pool = build_pool(me["cfg"])
-    if not pool:
-        await m.answer("No hay preguntas con esos filtros. Ajusta con /cat y /diff", reply_markup=main_kb())
-        return
-
-    queue = make_round_queue(pool, QUESTIONS_PER_ROUND)
-    if not queue:
-        await m.answer("No hay suficientes preguntas para comenzar.", reply_markup=main_kb())
-        return
-
-    me["free"] -= 1
-    me["round"] = {
-        "asked": 0, "score": 0, "current_correct": None,
-        "queue": queue, "total_q": len(queue)
-    }
-
-    await m.answer(f"▶️ ¡Comienza la ronda! ({len(queue)} preguntas)")
-    await ask_next_question(m, me)
-
-async def ask_next_question(m: Message, me: dict):
-    r = me["round"]
-    i = r["asked"]
-    item = r["queue"][i]
-    r["current_correct"] = item["correct"]
-
-    kb = InlineKeyboardBuilder()
-    for j, txt in enumerate(item["answers"]):
-        kb.button(text=txt, callback_data=f"ans:{j}")
-    kb.adjust(2)
-
-    await m.answer(f"❓ *Pregunta:*\n{item['q']}", reply_markup=kb.as_markup(), parse_mode="Markdown")
-
-async def finish_round(m: Message, uid: int, me: dict):
-    r = me["round"]
-    pts = r["score"]
-    total_q = r["total_q"]
-    me["total"] += pts
-    me["round"] = None
-    save_scores()
-
-    await m.answer(f"🏁 Ronda terminada: *{pts}/{total_q}* pts.\n"
-                   f"Tu puntaje total: *{me['total']}*.",
-                   parse_mode="Markdown",
-                   reply_markup=main_kb())
-
-# --------------- Handlers básicos ---------------
 @dp.message(Command("start"))
 async def cmd_start(m: Message):
-    uid, me = ensure_user(m)
+    u = get_user(m.from_user.id, m.from_user.username or m.from_user.full_name)
     await m.answer(
-        "¡Bienvenido a *Reto Relámpago LATAM*! ⚡\n\n"
-        f"Tienes *{me['free']}* partidas gratis hoy.\n"
-        "Comandos:\n"
-        "• /play – jugar 1 ronda\n"
-        "• /daily – cofre diario (+1 partida)\n"
-        "• /rank – ver ranking\n"
-        "• /cat – elegir categoría\n"
-        "• /diff – elegir dificultad\n"
-        "• /mode – ver filtros actuales\n"
-        "• /help – ayuda",
-        parse_mode="Markdown",
-        reply_markup=main_kb()
+        f"¡Bienvenido a Reto Relámpago LATAM! ⚡\n\n"
+        f"Tienes {u['free_left']} partidas gratis hoy.\n\n" + fmt_cmds()
     )
 
 @dp.message(Command("help"))
 async def cmd_help(m: Message):
-    await m.answer("Responde 5 preguntas por ronda (sin repetirse). Usa /cat y /diff para filtrar. ¡Suerte!", reply_markup=main_kb())
+    await m.answer("Ayuda 📖\n\n" + fmt_cmds())
+
+@dp.message(Command("daily"))
+async def cmd_daily(m: Message):
+    # +1 ronda gratis por día (una vez al día)
+    u = get_user(m.from_user.id, m.from_user.username or m.from_user.full_name)
+    # Regla simple: si ya reclamó (tiene FREE_PER_DAY tras reset), no sumes infinito
+    # aquí permitimos sumar +1 hasta un máximo de FREE_PER_DAY+1
+    conn = db()
+    cur = conn.cursor()
+    cur.execute("UPDATE users SET free_left = MIN(free_left + 1, ?) WHERE user_id=?",
+                (FREE_PER_DAY + 1, u["user_id"]))
+    conn.commit()
+    conn.close()
+    u2 = get_user(m.from_user.id, m.from_user.username or m.from_user.full_name)
+    await m.answer(f"🎁 ¡Cofre diario reclamado! Partidas disponibles hoy: {u2['free_left']}")
+
+def parse_play_args(args: str|None):
+    cat = diff = None
+    if args:
+        parts = [p.strip().lower() for p in args.split() if p.strip()]
+        for p in parts:
+            if p in CATEGORIES: cat = p
+            if p in LEVELS:     diff = p
+    return cat, diff
+
+async def ask_next(m: Message, uid: int):
+    s = SESSIONS[uid]
+    q, answers, correct_pos, q_diff = pick_question(s["cat"], s["diff"])
+    # guardar correct_pos para esta pregunta
+    s["correct"] = correct_pos
+    SESSIONS[uid] = s
+
+    kb = InlineKeyboardBuilder()
+    for i, ans in enumerate(answers):
+        kb.button(text=ans, callback_data=f"ans:{correct_pos}:{i}:{uid}")
+    kb.adjust(2,2)
+
+    await m.answer(f"❓ *Pregunta*:\n{q}", reply_markup=kb.as_markup(), parse_mode="Markdown")
 
 @dp.message(Command("play"))
-async def cmd_play(m: Message):
-    await start_round(m)
+async def cmd_play(m: Message, command: CommandObject):
+    uid = m.from_user.id
+    uname = m.from_user.username or m.from_user.full_name
+    u = get_user(uid, uname)
 
-@dp.message(F.text.startswith("▶️ Jugar"))
-async def btn_play(m: Message):
-    await start_round(m)
+    if u["free_left"] <= 0:
+        await m.answer("Hoy ya usaste tus partidas gratis. Vuelve mañana o usa /daily para ganar una ronda extra.")
+        return
+
+    # parsear filtros opcionales
+    cat, diff = parse_play_args(command.args)
+    if cat and cat not in CATEGORIES:
+        await m.answer(f"Categoría no válida. Usa: {', '.join(sorted(CATEGORIES))}")
+        return
+    if diff and diff not in LEVELS:
+        await m.answer(f"Dificultad no válida. Usa: {', '.join(sorted(LEVELS))}")
+        return
+
+    # descontar la ronda
+    dec_free_round(uid)
+    SESSIONS[uid] = {"n": 0, "score": 0, "cat": cat, "diff": diff}
+
+    await m.answer(f"▶️ ¡Comienza la ronda! (5 preguntas)\n"
+                   f"Filtros: "
+                   f"{'categoría='+cat if cat else 'categoría: todas'} | "
+                   f"{'nivel='+diff if diff else 'nivel: todos'}")
+
+    await ask_next(m, uid)
 
 @dp.callback_query(F.data.startswith("ans:"))
 async def on_answer(cb: CallbackQuery):
-    uid, me = ensure_user(cb)
-    if not me["round"]:
-        await cb.answer("No hay una ronda activa. Usa /play.", show_alert=True)
-        return
-
     try:
-        _, choice_str = cb.data.split(":", 1)
-        chosen = int(choice_str)
+        _, correct_pos, chosen, uid_s = cb.data.split(":")
+        correct_pos = int(correct_pos); chosen = int(chosen); uid = int(uid_s)
     except Exception:
         await cb.answer()
         return
 
-    correct = me["round"]["current_correct"]
-    if correct is None:
+    # ignorar si no es su sesión
+    if cb.from_user.id != uid or uid not in SESSIONS:
         await cb.answer()
         return
 
-    if chosen == correct:
-        me["round"]["score"] += 1
+    s = SESSIONS[uid]
+    # evaluar
+    if chosen == s["correct"]:
+        s["score"] += 1
         await cb.message.answer("✅ ¡Correcto!")
     else:
         await cb.message.answer("❌ Incorrecto. ¡A la próxima!")
 
-    me["round"]["asked"] += 1
+    s["n"] += 1
+    SESSIONS[uid] = s
     await cb.answer()
 
-    if me["round"]["asked"] >= me["round"]["total_q"]:
-        await finish_round(cb.message, uid, me)
+    if s["n"] < QUESTIONS_PER_ROUND:
+        await ask_next(cb.message, uid)
     else:
-        await ask_next_question(cb.message, me)
-
-@dp.message(Command("daily"))
-async def cmd_daily(m: Message):
-    uid, me = ensure_user(m)
-    day = today_key()
-    if me["daily_claim_day"] == day:
-        await m.answer("Ya reclamaste tu cofre diario hoy.", reply_markup=main_kb())
-        return
-    me["daily_claim_day"] = day
-    me["free"] += 1
-    await m.answer("🎁 ¡Cofre diario abierto! +1 partida añadida.", reply_markup=main_kb())
-
-@dp.message(F.text.startswith("🎁 Cofre diario"))
-async def btn_daily(m: Message):
-    await cmd_daily(m)
+        # fin de ronda
+        puntos = s["score"]
+        # bonus por dificultad si hubo filtro
+        if s["diff"] in DIFF_BONUS:
+            puntos += DIFF_BONUS[s["diff"]]
+        add_points(uid, puntos)
+        await cb.message.answer(f"🏁 Ronda terminada: {s['score']}/{QUESTIONS_PER_ROUND} pts.\n"
+                                f"Bonus dificultad: {DIFF_BONUS.get(s['diff'],0)}\n"
+                                f"Total agregado: {puntos} pts.\n"
+                                f"Usa /rank para ver el marcador.")
+        del SESSIONS[uid]
 
 @dp.message(Command("rank"))
 async def cmd_rank(m: Message):
-    top = sorted(USERS.items(), key=lambda kv: kv[1].get("total", 0), reverse=True)[:10]
-    if not top:
-        await m.answer("Aún no hay puntajes. ¡Sé el primero!", reply_markup=main_kb())
+    rows = top_users(10)
+    if not rows:
+        await m.answer("No hay puntajes aún. ¡Juega con /play!")
         return
-    lines = [f"🏆 *Ranking semanal*"]
-    for i, (uid, u) in enumerate(top, start=1):
-        lines.append(f"{i}. {u['name']} — *{u.get('total',0)}* pts")
-    await m.answer("\n".join(lines), parse_mode="Markdown", reply_markup=main_kb())
+    txt = ["🏆 Ranking semanal"]
+    pos = 1
+    for name, pts in rows:
+        alias = name or "Jugador"
+        txt.append(f"{pos}. {alias} — {pts} pts")
+        pos += 1
+    await m.answer("\n".join(txt))
 
-@dp.message(F.text.startswith("🏆 Ranking"))
-async def btn_rank(m: Message):
-    await cmd_rank(m)
-
-# --------------- Filtros: categoría/dificultad ---------------
-@dp.message(Command("mode"))
-async def cmd_mode(m: Message):
-    uid, me = ensure_user(m)
-    c = me["cfg"]["category"] or "Todas"
-    d = me["cfg"]["difficulty"] or "Todas"
-    await m.answer(f"⚙️ Filtros actuales:\n• Categoría: *{c}*\n• Dificultad: *{d}*",
-                   parse_mode="Markdown", reply_markup=main_kb())
-
-@dp.message(Command("cat"))
-async def cmd_cat(m: Message):
-    uid, me = ensure_user(m)
-    cats = categories_list()
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Todas", callback_data="setcat:__ALL__")
-    for c in cats:
-        kb.button(text=c, callback_data=f"setcat:{c}")
-    kb.adjust(3)
-    await m.answer("Elige categoría:", reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data.startswith("setcat:"))
-async def on_setcat(cb: CallbackQuery):
-    uid, me = ensure_user(cb)
-    val = cb.data.split(":",1)[1]
-    me["cfg"]["category"] = None if val == "__ALL__" else val
-    await cb.message.answer(f"✅ Categoría seleccionada: {me['cfg']['category'] or 'Todas'}")
-    await cb.answer()
-
-@dp.message(Command("diff"))
-async def cmd_diff(m: Message):
-    uid, me = ensure_user(m)
-    diffs = difficulties_list() or ["Fácil","Media","Difícil","Normal"]
-    kb = InlineKeyboardBuilder()
-    kb.button(text="Todas", callback_data="setdiff:__ALL__")
-    for d in diffs:
-        kb.button(text=d, callback_data=f"setdiff:{d}")
-    kb.adjust(3)
-    await m.answer("Elige dificultad:", reply_markup=kb.as_markup())
-
-@dp.callback_query(F.data.startswith("setdiff:"))
-async def on_setdiff(cb: CallbackQuery):
-    uid, me = ensure_user(cb)
-    val = cb.data.split(":",1)[1]
-    me["cfg"]["difficulty"] = None if val == "__ALL__" else val
-    await cb.message.answer(f"✅ Dificultad seleccionada: {me['cfg']['difficulty'] or 'Todas'}")
-    await cb.answer()
-
-# --------------- Main ---------------
 async def main():
-    me = await bot.get_me()
-    logging.info(f"Conectado como @{me.username} (id {me.id}) - '{me.first_name}'")
+    init_db()
+    # Log de identidad del bot
+    me = await bot.me()
+    logging.info(f"Conectado como @{me.username} (id {me.id})")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":

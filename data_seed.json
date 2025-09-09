@@ -1,14 +1,14 @@
 [
-  {"q":"¿Qué plataforma usa Reels?","a":["Twitch","Reddit","Twitter","Instagram"],"correct":3},
-  {"q":"¿En qué país se ubicó el Imperio Inca?","a":["Colombia","México","Perú","Chile"],"correct":2},
-  {"q":"¿Qué metal es líquido a temperatura ambiente?","a":["Mercurio","Plomo","Hierro","Calcio"],"correct":0},
-  {"q":"¿Cuál es la capital de Argentina?","a":["Buenos Aires","Córdoba","Rosario","La Plata"],"correct":0},
-  {"q":"¿Cuántos minutos tiene una hora?","a":["60","30","90","45"],"correct":0},
-  {"q":"¿Qué empresa creó Android?","a":["Microsoft","Google","Apple","Nokia"],"correct":1},
-  {"q":"¿Qué jugador ganó el Mundial 2010 con España?","a":["Messi","Iniesta","Neymar","Ronaldo"],"correct":1}
-  {"q":"¿Cuántos minutos tiene una hora?","a":["30","45","90","60"],"correct":3,"category":"General","difficulty":"Fácil"},
-  {"q":"¿Qué metal es líquido a temperatura ambiente?","a":["Hierro","Calcio","Plomo","Mercurio"],"correct":3,"category":"Ciencia","difficulty":"Media"},
-  {"q":"¿Quién pintó Guernica?","a":["Dalí","Picasso","Velázquez","Goya"],"correct":1,"category":"Arte","difficulty":"Media"},
-  {"q":"¿Cuál es el río más largo del mundo?","a":["Nilo","Amazonas","Yangtsé","Misisipi"],"correct":1,"category":"Geografía","difficulty":"Difícil"}
+  {"q":"¿Cuál es la capital de Argentina?","a":["La Plata","Córdoba","Buenos Aires","Rosario"],"correct":2,"category":"geografia","difficulty":"facil"},
+  {"q":"¿Cuántos minutos tiene una hora?","a":["30","45","90","60"],"correct":3,"category":"ciencia","difficulty":"facil"},
+  {"q":"¿Qué metal es líquido a temperatura ambiente?","a":["Hierro","Calcio","Plomo","Mercurio"],"correct":3,"category":"ciencia","difficulty":"media"},
+  {"q":"¿Qué plataforma usa Reels?","a":["Reddit","Instagram","Twitch","Twitter"],"correct":1,"category":"entretenimiento","difficulty":"facil"},
+  {"q":"¿En qué país se ubicó el Imperio Inca?","a":["Colombia","México","Perú","Chile"],"correct":2,"category":"historia","difficulty":"facil"},
+  {"q":"¿Qué empresa creó Android?","a":["Apple","Google","Microsoft","Nokia"],"correct":1,"category":"tecnologia","difficulty":"media"},
+  {"q":"¿Cuál es la capital de México?","a":["Guadalajara","Monterrey","Puebla","Ciudad de México"],"correct":3,"category":"geografia","difficulty":"facil"},
+  {"q":"¿Qué planeta es el más grande del sistema solar?","a":["Saturno","Neptuno","Júpiter","Urano"],"correct":2,"category":"ciencia","difficulty":"facil"},
+  {"q":"¿Cuál es la fórmula del agua?","a":["CO2","O2","H2O","NaCl"],"correct":2,"category":"ciencia","difficulty":"facil"},
+  {"q":"¿Quién pintó la Mona Lisa?","a":["Picasso","Van Gogh","Da Vinci","Rembrandt"],"correct":2,"category":"arte","difficulty":"media"},
+  {"q":"¿Qué selección ganó el Mundial 2010?","a":["España","Países Bajos","Alemania","Brasil"],"correct":0,"category":"deportes","difficulty":"media"},
+  {"q":"¿Cuál es la capital de Colombia?","a":["Medellín","Bogotá","Cali","Barranquilla"],"correct":1,"category":"geografia","difficulty":"facil"}
 ]
-
