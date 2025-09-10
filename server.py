@@ -1,30 +1,28 @@
+# server.py
 import asyncio
+import logging
 from fastapi import FastAPI
-import uvicorn
+from bot import run_bot  # Importa la función que arranca tu bot
 
-from bot import run_bot  # importa el runner del bot (definido en bot.py)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 app = FastAPI()
-bot_task: asyncio.Task | None = None
-
+bot_task = None  # type: ignore
 
 @app.get("/")
-async def root():
-    return {"ok": True, "service": "reto-relampago", "status": "alive"}
-
+def root():
+    return {"ok": True, "service": "reto-relampago-bot"}
 
 @app.get("/health")
-async def health():
+def health():
     return {"status": "ok"}
-
 
 @app.on_event("startup")
 async def _startup():
     global bot_task
-    # Lanza el bot en segundo plano al iniciar el server
     if bot_task is None or bot_task.done():
         bot_task = asyncio.create_task(run_bot())
-
+        logging.info("Bot lanzado en background desde FastAPI.")
 
 @app.on_event("shutdown")
 async def _shutdown():
@@ -35,9 +33,9 @@ async def _shutdown():
             await bot_task
         except Exception:
             pass
+        logging.info("Bot detenido en shutdown.")
 
-
+# Para probar en local: python server.py
 if __name__ == "__main__":
-    # Solo para pruebas locales. En Render no se usa esta rama.
+    import uvicorn
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
-
